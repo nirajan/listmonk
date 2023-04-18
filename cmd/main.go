@@ -13,10 +13,11 @@ import (
 	"time"
 
 	"github.com/jmoiron/sqlx"
-	"github.com/knadh/koanf"
 	"github.com/knadh/koanf/providers/env"
+	"github.com/knadh/koanf/v2"
 	"github.com/knadh/listmonk/internal/bounce"
 	"github.com/knadh/listmonk/internal/buflog"
+	"github.com/knadh/listmonk/internal/captcha"
 	"github.com/knadh/listmonk/internal/core"
 	"github.com/knadh/listmonk/internal/i18n"
 	"github.com/knadh/listmonk/internal/manager"
@@ -47,6 +48,7 @@ type App struct {
 	i18n       *i18n.I18n
 	bounce     *bounce.Manager
 	paginator  *paginator.Paginator
+	captcha    *captcha.Captcha
 	notifTpls  *notifTpls
 	log        *log.Logger
 	bufLog     *buflog.BufLog
@@ -168,6 +170,7 @@ func main() {
 		messengers: make(map[string]messenger.Messenger),
 		log:        lo,
 		bufLog:     bufLog,
+		captcha:    initCaptcha(),
 
 		paginator: paginator.New(paginator.Opt{
 			DefaultPerPage: 20,
@@ -175,23 +178,27 @@ func main() {
 			NumPageNums:    10,
 			PageParam:      "page",
 			PerPageParam:   "per_page",
+			AllowAll:       true,
 		}),
 	}
 
 	// Load i18n language map.
 	app.i18n = initI18n(app.constants.Lang, fs)
-
-	app.core = core.New(&core.Opt{
+	cOpt := &core.Opt{
 		Constants: core.Constants{
 			SendOptinConfirmation: app.constants.SendOptinConfirmation,
-			MaxBounceCount:        ko.MustInt("bounce.count"),
-			BounceAction:          ko.MustString("bounce.action"),
 		},
 		Queries: queries,
 		DB:      db,
 		I18n:    app.i18n,
 		Log:     lo,
-	}, &core.Hooks{
+	}
+
+	if err := ko.Unmarshal("bounce.actions", &cOpt.Constants.BounceActions); err != nil {
+		lo.Fatalf("error unmarshalling bounce config: %v", err)
+	}
+
+	app.core = core.New(cOpt, &core.Hooks{
 		SendOptinConfirmation: sendOptinConfirmationHook(app),
 	})
 

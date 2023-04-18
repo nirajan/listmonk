@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/gofrs/uuid"
-	"github.com/knadh/koanf"
 	"github.com/knadh/koanf/parsers/json"
 	"github.com/knadh/koanf/providers/rawbytes"
+	"github.com/knadh/koanf/v2"
 	"github.com/knadh/listmonk/internal/messenger"
 	"github.com/knadh/listmonk/internal/messenger/email"
 	"github.com/knadh/listmonk/models"
@@ -44,6 +44,7 @@ func handleGetSettings(c echo.Context) error {
 	}
 	s.UploadS3AwsSecretAccessKey = ""
 	s.SendgridKey = ""
+	s.SecurityCaptchaSecret = ""
 
 	return c.JSON(http.StatusOK, okResp{s})
 }
@@ -157,6 +158,9 @@ func handleUpdateSettings(c echo.Context) error {
 	}
 	if set.SendgridKey == "" {
 		set.SendgridKey = cur.SendgridKey
+	}
+	if set.SecurityCaptchaSecret == "" {
+		set.SecurityCaptchaSecret = cur.SecurityCaptchaSecret
 	}
 
 	// Domain blocklist.

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"net/textproto"
 	"regexp"
 	"strings"
 	txttpl "text/template"
@@ -78,8 +79,9 @@ const (
 	EmailHeaderDeliveredTo = "Delivered-To"
 	EmailHeaderReceived    = "Received"
 
-	BounceTypeHard = "hard"
-	BounceTypeSoft = "soft"
+	BounceTypeHard      = "hard"
+	BounceTypeSoft      = "soft"
+	BounceTypeComplaint = "complaint"
 
 	// Templates.
 	TemplateTypeCampaign = "campaign"
@@ -347,6 +349,10 @@ type Bounce struct {
 
 // TxMessage represents an e-mail campaign.
 type TxMessage struct {
+	SubscriberEmails []string `json:"subscriber_emails"`
+	SubscriberIDs    []int    `json:"subscriber_ids"`
+
+	// Deprecated.
 	SubscriberEmail string `json:"subscriber_email"`
 	SubscriberID    int    `json:"subscriber_id"`
 
@@ -357,10 +363,20 @@ type TxMessage struct {
 	ContentType string                 `json:"content_type"`
 	Messenger   string                 `json:"messenger"`
 
+	// File attachments added from multi-part form data.
+	Attachments []TxAttachment `json:"-"`
+
 	Subject    string             `json:"-"`
 	Body       []byte             `json:"-"`
 	Tpl        *template.Template `json:"-"`
 	SubjectTpl *txttpl.Template   `json:"-"`
+}
+
+// TxAttachment is used by TxMessage, consists of FileName and file Content in bytes
+type TxAttachment struct {
+	Name    string
+	Header  textproto.MIMEHeader
+	Content []byte
 }
 
 // markdown is a global instance of Markdown parser and renderer.
@@ -491,11 +507,6 @@ func (c *Campaign) CompileTemplate(f template.FuncMap) error {
 			return fmt.Errorf("error compiling subject: %v", err)
 		}
 		c.SubjectTpl = subjTpl
-	}
-
-	// No template or body. Nothing to compile.
-	if c.TemplateBody == "" || c.Body == "" {
-		return nil
 	}
 
 	// Compile the base template.

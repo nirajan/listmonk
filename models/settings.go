@@ -2,17 +2,18 @@ package models
 
 // Settings represents the app settings stored in the DB.
 type Settings struct {
-	AppSiteName           string   `json:"app.site_name"`
-	AppRootURL            string   `json:"app.root_url"`
-	AppLogoURL            string   `json:"app.logo_url"`
-	AppFaviconURL         string   `json:"app.favicon_url"`
-	AppFromEmail          string   `json:"app.from_email"`
-	AppNotifyEmails       []string `json:"app.notify_emails"`
-	EnablePublicSubPage   bool     `json:"app.enable_public_subscription_page"`
-	EnablePublicArchive   bool     `json:"app.enable_public_archive"`
-	SendOptinConfirmation bool     `json:"app.send_optin_confirmation"`
-	CheckUpdates          bool     `json:"app.check_updates"`
-	AppLang               string   `json:"app.lang"`
+	AppSiteName                   string   `json:"app.site_name"`
+	AppRootURL                    string   `json:"app.root_url"`
+	AppLogoURL                    string   `json:"app.logo_url"`
+	AppFaviconURL                 string   `json:"app.favicon_url"`
+	AppFromEmail                  string   `json:"app.from_email"`
+	AppNotifyEmails               []string `json:"app.notify_emails"`
+	EnablePublicSubPage           bool     `json:"app.enable_public_subscription_page"`
+	EnablePublicArchive           bool     `json:"app.enable_public_archive"`
+	EnablePublicArchiveRSSContent bool     `json:"app.enable_public_archive_rss_content"`
+	SendOptinConfirmation         bool     `json:"app.send_optin_confirmation"`
+	CheckUpdates                  bool     `json:"app.check_updates"`
+	AppLang                       string   `json:"app.lang"`
 
 	AppBatchSize     int `json:"app.batch_size"`
 	AppConcurrency   int `json:"app.concurrency"`
@@ -31,6 +32,10 @@ type Settings struct {
 	PrivacyAllowWipe          bool     `json:"privacy.allow_wipe"`
 	PrivacyExportable         []string `json:"privacy.exportable"`
 	DomainBlocklist           []string `json:"privacy.domain_blocklist"`
+
+	SecurityEnableCaptcha bool   `json:"security.enable_captcha"`
+	SecurityCaptchaKey    string `json:"security.captcha_key"`
+	SecurityCaptchaSecret string `json:"security.captcha_secret"`
 
 	UploadProvider             string `json:"upload.provider"`
 	UploadFilesystemUploadPath string `json:"upload.filesystem.upload_path"`
@@ -76,14 +81,16 @@ type Settings struct {
 		MaxMsgRetries int    `json:"max_msg_retries"`
 	} `json:"messengers"`
 
-	BounceEnabled        bool   `json:"bounce.enabled"`
-	BounceEnableWebhooks bool   `json:"bounce.webhooks_enabled"`
-	BounceCount          int    `json:"bounce.count"`
-	BounceAction         string `json:"bounce.action"`
-	SESEnabled           bool   `json:"bounce.ses_enabled"`
-	SendgridEnabled      bool   `json:"bounce.sendgrid_enabled"`
-	SendgridKey          string `json:"bounce.sendgrid_key"`
-	BounceBoxes          []struct {
+	BounceEnabled        bool `json:"bounce.enabled"`
+	BounceEnableWebhooks bool `json:"bounce.webhooks_enabled"`
+	BounceActions        map[string]struct {
+		Count  int    `json:"count"`
+		Action string `json:"action"`
+	} `json:"bounce.actions"`
+	SESEnabled      bool   `json:"bounce.ses_enabled"`
+	SendgridEnabled bool   `json:"bounce.sendgrid_enabled"`
+	SendgridKey     string `json:"bounce.sendgrid_key"`
+	BounceBoxes     []struct {
 		UUID          string `json:"uuid"`
 		Enabled       bool   `json:"enabled"`
 		Type          string `json:"type"`

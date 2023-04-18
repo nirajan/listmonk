@@ -295,8 +295,8 @@ SELECT subscribers.* FROM subscribers
         AND subscriber_lists.subscriber_id = subscribers.id
     )
     WHERE (CARDINALITY($1) = 0 OR subscriber_lists.list_id = ANY($1::INT[]))
-    %s
-    ORDER BY %s %s OFFSET $2 LIMIT (CASE WHEN $3 = 0 THEN NULL ELSE $3 END);
+    %query%
+    ORDER BY %order% OFFSET $2 LIMIT (CASE WHEN $3 < 1 THEN NULL ELSE $3 END);
 
 -- name: query-subscribers-count
 -- Replica of query-subscribers for obtaining the results count.
@@ -323,16 +323,16 @@ SELECT subscribers.id,
        subscribers.created_at,
        subscribers.updated_at
        FROM subscribers
-    LEFT JOIN subscriber_lists sl
+    LEFT JOIN subscriber_lists
     ON (
         -- Optional list filtering.
         (CASE WHEN CARDINALITY($1::INT[]) > 0 THEN true ELSE false END)
-        AND sl.subscriber_id = subscribers.id
+        AND subscriber_lists.subscriber_id = subscribers.id
     )
-    WHERE sl.list_id = ALL($1::INT[]) AND id > $2
+    WHERE subscriber_lists.list_id = ALL($1::INT[]) AND id > $2
     AND (CASE WHEN CARDINALITY($3::INT[]) > 0 THEN id=ANY($3) ELSE true END)
-    %s
-    ORDER BY subscribers.id ASC LIMIT (CASE WHEN $4 = 0 THEN NULL ELSE $4 END);
+    %query%
+    ORDER BY subscribers.id ASC LIMIT (CASE WHEN $4 < 1 THEN NULL ELSE $4 END);
 
 -- name: query-subscribers-template
 -- raw: true
@@ -400,10 +400,11 @@ WITH ls AS (
         CASE
             WHEN $1 > 0 THEN id = $1
             WHEN $2 != '' THEN uuid = $2::UUID
-            WHEN $3 != '' THEN name ILIKE $3
+            WHEN $3 != '' THEN to_tsvector(name) @@ to_tsquery ($3)
             ELSE true
         END
-    OFFSET $4 LIMIT (CASE WHEN $5 = 0 THEN NULL ELSE $5 END)
+    ORDER BY %order%
+    OFFSET $4 LIMIT (CASE WHEN $5 < 1 THEN NULL ELSE $5 END)
 ),
 counts AS (
     SELECT list_id, JSON_OBJECT_AGG(status, subscriber_count) AS subscriber_statuses FROM (
@@ -413,7 +414,7 @@ counts AS (
     ) row GROUP BY list_id
 )
 SELECT ls.*, subscriber_statuses FROM ls
-    LEFT JOIN counts ON (counts.list_id = ls.id) ORDER BY %s %s;
+    LEFT JOIN counts ON (counts.list_id = ls.id) ORDER BY %order%;
 
 
 -- name: get-lists-by-optin
@@ -503,8 +504,8 @@ SELECT  c.id, c.uuid, c.name, c.subject, c.from_email,
 FROM campaigns c
 WHERE ($1 = 0 OR id = $1)
     AND status=ANY(CASE WHEN CARDINALITY($2::campaign_status[]) != 0 THEN $2::campaign_status[] ELSE ARRAY[status] END)
-    AND ($3 = '' OR CONCAT(name, subject) ILIKE $3)
-ORDER BY %s %s OFFSET $4 LIMIT (CASE WHEN $5 = 0 THEN NULL ELSE $5 END);
+    AND ($3 = '' OR TO_TSVECTOR(CONCAT(name, ' ', subject)) @@ TO_TSQUERY($3))
+ORDER BY %order% OFFSET $4 LIMIT (CASE WHEN $5 < 1 THEN NULL ELSE $5 END);
 
 -- name: get-campaign
 SELECT campaigns.*,
@@ -517,9 +518,15 @@ SELECT campaigns.*,
     WHERE CASE WHEN $1 > 0 THEN campaigns.id = $1 ELSE uuid = $2 END;
 
 -- name: get-archived-campaigns
-SELECT COUNT(*) OVER () AS total, id, uuid, subject, archive_meta, created_at FROM campaigns
-    WHERE archive=true AND type='regular' AND status=ANY('{running, paused, finished}')
-    ORDER by created_at DESC OFFSET $1 LIMIT $2;
+SELECT COUNT(*) OVER () AS total, campaigns.*,
+    COALESCE(templates.body, (SELECT body FROM templates WHERE is_default = true LIMIT 1)) AS template_body
+    FROM campaigns
+    LEFT JOIN templates ON (
+        CASE WHEN $3 = 'default' THEN templates.id = campaigns.template_id
+        ELSE templates.id = campaigns.archive_template_id END
+    )
+    WHERE campaigns.archive=true AND campaigns.type='regular' AND campaigns.status=ANY('{running, paused, finished}')
+    ORDER by campaigns.created_at DESC OFFSET $1 LIMIT $2;
 
 -- name: get-campaign-stats
 -- This query is used to lazy load campaign stats (views, counts, list of lists) given a list of campaign IDs.
@@ -972,15 +979,9 @@ WITH sub AS (
 camp AS (
     SELECT id FROM campaigns WHERE $3 != '' AND uuid = $3::UUID
 ),
-bounce AS (
-    -- Record the bounce if the subscriber is not already blocklisted;
-    INSERT INTO bounces (subscriber_id, campaign_id, type, source, meta, created_at)
-    SELECT (SELECT id FROM sub), (SELECT id FROM camp), $4, $5, $6, $7
-    WHERE NOT EXISTS (SELECT 1 WHERE (SELECT status FROM sub) = 'blocklisted')
-),
 num AS (
     -- Add a +1 to include the current insertion that is happening.
-    SELECT COUNT(*) + 1 AS num FROM bounces WHERE subscriber_id = (SELECT id FROM sub)
+    SELECT COUNT(*) + 1 AS num FROM bounces WHERE subscriber_id = (SELECT id FROM sub) AND type = $4
 ),
 -- block1 and block2 will run when $8 = 'blocklist' and the number of bounces exceed $8.
 block1 AS (
@@ -989,7 +990,13 @@ block1 AS (
 ),
 block2 AS (
     UPDATE subscriber_lists SET status='unsubscribed'
-    WHERE $9 = 'blocklist' AND (SELECT num FROM num) >= $8 AND subscriber_id = (SELECT id FROM sub) AND (SELECT status FROM sub) != 'blocklisted'
+    WHERE $9 = 'unsubscribe' AND (SELECT num FROM num) >= $8 AND subscriber_id = (SELECT id FROM sub) AND (SELECT status FROM sub) != 'blocklisted'
+),
+bounce AS (
+    -- Record the bounce if the subscriber is not already blocklisted;
+    INSERT INTO bounces (subscriber_id, campaign_id, type, source, meta, created_at)
+    SELECT (SELECT id FROM sub), (SELECT id FROM camp), $4, $5, $6, $7
+    WHERE NOT EXISTS (SELECT 1 WHERE (SELECT status FROM sub) = 'blocklisted' OR (SELECT num FROM num) > $8)
 )
 -- This delete  will only run when $9 = 'delete' and the number of bounces exceed $8.
 DELETE FROM subscribers
@@ -1018,7 +1025,7 @@ WHERE ($1 = 0 OR bounces.id = $1)
     AND ($2 = 0 OR bounces.campaign_id = $2)
     AND ($3 = 0 OR bounces.subscriber_id = $3)
     AND ($4 = '' OR bounces.source = $4)
-ORDER BY %s %s OFFSET $5 LIMIT $6;
+ORDER BY %order% OFFSET $5 LIMIT $6;
 
 -- name: delete-bounces
 DELETE FROM bounces WHERE CARDINALITY($1::INT[]) = 0 OR id = ANY($1);

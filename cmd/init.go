@@ -12,18 +12,20 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Masterminds/sprig/v3"
 	"github.com/jmoiron/sqlx"
 	"github.com/jmoiron/sqlx/types"
 	"github.com/knadh/goyesql/v2"
 	goyesqlx "github.com/knadh/goyesql/v2/sqlx"
-	"github.com/knadh/koanf"
 	"github.com/knadh/koanf/maps"
 	"github.com/knadh/koanf/parsers/toml"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/providers/posflag"
+	"github.com/knadh/koanf/v2"
 	"github.com/knadh/listmonk/internal/bounce"
 	"github.com/knadh/listmonk/internal/bounce/mailbox"
+	"github.com/knadh/listmonk/internal/captcha"
 	"github.com/knadh/listmonk/internal/i18n"
 	"github.com/knadh/listmonk/internal/manager"
 	"github.com/knadh/listmonk/internal/media"
@@ -49,26 +51,32 @@ const (
 
 // constants contains static, constant config values required by the app.
 type constants struct {
-	SiteName              string   `koanf:"site_name"`
-	RootURL               string   `koanf:"root_url"`
-	LogoURL               string   `koanf:"logo_url"`
-	FaviconURL            string   `koanf:"favicon_url"`
-	FromEmail             string   `koanf:"from_email"`
-	NotifyEmails          []string `koanf:"notify_emails"`
-	EnablePublicSubPage   bool     `koanf:"enable_public_subscription_page"`
-	EnablePublicArchive   bool     `koanf:"enable_public_archive"`
-	SendOptinConfirmation bool     `koanf:"send_optin_confirmation"`
-	Lang                  string   `koanf:"lang"`
-	DBBatchSize           int      `koanf:"batch_size"`
-	Privacy               struct {
+	SiteName                      string   `koanf:"site_name"`
+	RootURL                       string   `koanf:"root_url"`
+	LogoURL                       string   `koanf:"logo_url"`
+	FaviconURL                    string   `koanf:"favicon_url"`
+	FromEmail                     string   `koanf:"from_email"`
+	NotifyEmails                  []string `koanf:"notify_emails"`
+	EnablePublicSubPage           bool     `koanf:"enable_public_subscription_page"`
+	EnablePublicArchive           bool     `koanf:"enable_public_archive"`
+	EnablePublicArchiveRSSContent bool     `koanf:"enable_public_archive_rss_content"`
+	SendOptinConfirmation         bool     `koanf:"send_optin_confirmation"`
+	Lang                          string   `koanf:"lang"`
+	DBBatchSize                   int      `koanf:"batch_size"`
+	Privacy                       struct {
 		IndividualTracking bool            `koanf:"individual_tracking"`
 		AllowPreferences   bool            `koanf:"allow_preferences"`
 		AllowBlocklist     bool            `koanf:"allow_blocklist"`
 		AllowExport        bool            `koanf:"allow_export"`
 		AllowWipe          bool            `koanf:"allow_wipe"`
 		Exportable         map[string]bool `koanf:"-"`
-		DomainBlocklist    map[string]bool `koanf:"-"`
+		DomainBlocklist    []string        `koanf:"-"`
 	} `koanf:"privacy"`
+	Security struct {
+		EnableCaptcha bool   `koanf:"enable_captcha"`
+		CaptchaKey    string `koanf:"captcha_key"`
+		CaptchaSecret string `koanf:"captcha_secret"`
+	} `koanf:"security"`
 	AdminUsername []byte `koanf:"admin_username"`
 	AdminPassword []byte `koanf:"admin_password"`
 
@@ -248,6 +256,7 @@ func initDB() *sqlx.DB {
 		Password    string        `koanf:"password"`
 		DBName      string        `koanf:"database"`
 		SSLMode     string        `koanf:"ssl_mode"`
+		Params      string        `koanf:"params"`
 		MaxOpen     int           `koanf:"max_open"`
 		MaxIdle     int           `koanf:"max_idle"`
 		MaxLifetime time.Duration `koanf:"max_lifetime"`
@@ -258,7 +267,7 @@ func initDB() *sqlx.DB {
 
 	lo.Printf("connecting to db: %s:%d/%s", c.Host, c.Port, c.DBName)
 	db, err := sqlx.Connect("postgres",
-		fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s", c.Host, c.Port, c.User, c.Password, c.DBName, c.SSLMode))
+		fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s %s", c.Host, c.Port, c.User, c.Password, c.DBName, c.SSLMode, c.Params))
 	if err != nil {
 		lo.Fatalf("error connecting to DB: %v", err)
 	}
@@ -350,6 +359,9 @@ func initConstants() *constants {
 	if err := ko.Unmarshal("privacy", &c.Privacy); err != nil {
 		lo.Fatalf("error loading app.privacy config: %v", err)
 	}
+	if err := ko.Unmarshal("security", &c.Security); err != nil {
+		lo.Fatalf("error loading app.security config: %v", err)
+	}
 	if err := ko.UnmarshalWithConf("appearance", &c.Appearance, koanf.UnmarshalConf{FlatPaths: true}); err != nil {
 		lo.Fatalf("error loading app.appearance config: %v", err)
 	}
@@ -358,7 +370,7 @@ func initConstants() *constants {
 	c.Lang = ko.String("app.lang")
 	c.Privacy.Exportable = maps.StringSliceToLookupMap(ko.Strings("privacy.exportable"))
 	c.MediaProvider = ko.String("upload.provider")
-	c.Privacy.DomainBlocklist = maps.StringSliceToLookupMap(ko.Strings("privacy.domain_blocklist"))
+	c.Privacy.DomainBlocklist = ko.Strings("privacy.domain_blocklist")
 
 	// Static URLS.
 	// url.com/subscription/{campaign_uuid}/{subscriber_uuid}
@@ -592,12 +604,22 @@ func initNotifTemplates(path string, fs stuffbin.FileSystem, i *i18n.I18n, cs *c
 		"LogoURL": func() string {
 			return cs.LogoURL
 		},
+		"Date": func(layout string) string {
+			if layout == "" {
+				layout = time.ANSIC
+			}
+			return time.Now().Format(layout)
+		},
 		"L": func() *i18n.I18n {
 			return i
 		},
 		"Safe": func(safeHTML string) template.HTML {
 			return template.HTML(safeHTML)
 		},
+	}
+
+	for k, v := range sprig.GenericFuncMap() {
+		funcs[k] = v
 	}
 
 	tpls, err := stuffbin.ParseTemplatesGlob(funcs, fs, "/static/email-templates/*.html")
@@ -732,6 +754,12 @@ func initHTTPServer(app *App) *echo.Echo {
 	}()
 
 	return srv
+}
+
+func initCaptcha() *captcha.Captcha {
+	return captcha.New(captcha.Opt{
+		CaptchaSecret: ko.String("security.captcha_secret"),
+	})
 }
 
 func awaitReload(sigChan chan os.Signal, closerWait chan bool, closer func()) chan bool {

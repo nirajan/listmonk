@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/disintegration/imaging"
 	"github.com/knadh/listmonk/models"
@@ -14,13 +15,16 @@ import (
 
 const (
 	thumbPrefix   = "thumb_"
-	thumbnailSize = 90
+	thumbnailSize = 120
 )
 
 // validMimes is the list of image types allowed to be uploaded.
 var (
-	validMimes = []string{"image/jpg", "image/jpeg", "image/png", "image/gif"}
-	validExts  = []string{".jpg", ".jpeg", ".png", ".gif"}
+	validMimes = []string{"image/jpg", "image/jpeg", "image/png", "image/gif", "image/svg+xml"}
+	validExts  = []string{".jpg", ".jpeg", ".png", ".gif", ".svg"}
+
+	// Vector extensions that don't need to be resized for thumbnails.
+	vectorExts = []string{".svg"}
 )
 
 // handleUploadMedia handles media file uploads.
@@ -36,7 +40,7 @@ func handleUploadMedia(c echo.Context) error {
 	}
 
 	// Validate file extension.
-	ext := filepath.Ext(file.Filename)
+	ext := strings.ToLower(filepath.Ext(file.Filename))
 	if ok := inArray(ext, validExts); !ok {
 		return echo.NewHTTPError(http.StatusBadRequest,
 			app.i18n.Ts("media.unsupportedFileType", "type", ext))
@@ -78,22 +82,32 @@ func handleUploadMedia(c echo.Context) error {
 		}
 	}()
 
-	// Create thumbnail from file.
-	thumbFile, width, height, err := processImage(file)
-	if err != nil {
-		cleanUp = true
-		app.log.Printf("error resizing image: %v", err)
-		return echo.NewHTTPError(http.StatusInternalServerError,
-			app.i18n.Ts("media.errorResizing", "error", err.Error()))
-	}
+	// Create thumbnail from file for non-vector formats.
+	var (
+		thumbfName = fName
+		width      = 0
+		height     = 0
+	)
+	if !inArray(ext, vectorExts) {
+		thumbFile, w, h, err := processImage(file)
+		if err != nil {
+			cleanUp = true
+			app.log.Printf("error resizing image: %v", err)
+			return echo.NewHTTPError(http.StatusInternalServerError,
+				app.i18n.Ts("media.errorResizing", "error", err.Error()))
+		}
+		width = w
+		height = h
 
-	// Upload thumbnail.
-	thumbfName, err := app.media.Put(thumbPrefix+fName, typ, thumbFile)
-	if err != nil {
-		cleanUp = true
-		app.log.Printf("error saving thumbnail: %v", err)
-		return echo.NewHTTPError(http.StatusInternalServerError,
-			app.i18n.Ts("media.errorSavingThumbnail", "error", err.Error()))
+		// Upload thumbnail.
+		tf, err := app.media.Put(thumbPrefix+fName, typ, thumbFile)
+		if err != nil {
+			cleanUp = true
+			app.log.Printf("error saving thumbnail: %v", err)
+			return echo.NewHTTPError(http.StatusInternalServerError,
+				app.i18n.Ts("media.errorSavingThumbnail", "error", err.Error()))
+		}
+		thumbfName = tf
 	}
 
 	// Write to the DB.
